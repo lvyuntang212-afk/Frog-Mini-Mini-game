@@ -9,23 +9,24 @@
   body {
     margin:0; min-height:100vh;
     display:flex; flex-direction:column;
-    justify-content:center; align-items:center; gap:14px;
+    justify-content:flex-start; align-items:center; gap:0;
     font-family:'Avenir','Segoe UI','Helvetica Neue',Arial,sans-serif;
     background:linear-gradient(160deg,#0d1f14 0%,#1a3a26 60%,#2a5c3d 100%);
     touch-action:manipulation;
   }
-  .title-bar {
-    color:#aee8c5; font-size:22px; font-weight:bold; letter-spacing:6px;
-    text-shadow:0 0 12px rgba(126,255,180,.4);
-  }
   #game {
-    display:block; border-radius:18px;
+    display:block;
     max-width:100%; height:auto;
-    box-shadow:0 0 0 4px rgba(255,255,255,.08),
-               0 0 40px rgba(80,220,140,.25),
-               0 20px 50px rgba(0,0,0,.5);
+    box-shadow:0 20px 50px rgba(0,0,0,.5);
   }
-  .tips { color:#6fae8b; font-size:13px; letter-spacing:1px; }
+  /* 手机上铺满竖屏、无圆角 */
+  @media (max-width: 500px) {
+    #game {
+      width:100vw; max-width:100vw;
+      border-radius:0;
+      box-shadow:none;
+    }
+  }
   @keyframes shake {
     0%,100%{transform:translate(0,0)} 20%{transform:translate(-6px,3px)}
     40%{transform:translate(5px,-4px)} 60%{transform:translate(-4px,-3px)}
@@ -36,22 +37,20 @@
 </head>
 <body>
 
-<div class="title-bar">🐸 FROG HOP</div>
 <canvas id="game" width="400" height="600"></canvas>
-<div class="tips">Space / Tap to Jump &nbsp;·&nbsp; Rise to the Surface! &nbsp;·&nbsp; Dodge Pollen &nbsp;·&nbsp; 12 Pads × 3 Levels</div>
 
 <script>
 // ============================================================
-//  Frog Hop · Lake Adventure — v25 (Final Prototype)
+//  Frog Hop · Lake Adventure — v26 (Final Prototype)
+//  UI: header bar & tips removed; canvas fills mobile viewport
 //  Theme: GREEN underwater lake (v23 palette, submerged feel)
 //   · Backdrop: green-tinted lake gradient (#bfe8d8 → #3e8a68)
-//   · 8 scattered individual fish, slow drifting (0.08~0.2),
-//     tail wiggle, 30% camera parallax — no schools
+//   · 8 scattered individual fish, slow drifting, tail wiggle,
+//     30% camera parallax — no schools
 //   · Lakebed: green hills + mossy rocks + swaying seaweed
 //   · God rays + rising bubbles for the underwater feel
-//  Gameplay kept intact: full-climb smooth camera (ANCHOR .50
-//  / SMOOTH .07, frame-rate independent), 12 pads × 3 levels,
-//  pollen ramp, ripples, particles, sfx, best record
+//  Gameplay kept intact: full-climb smooth camera, 12 pads ×
+//  3 levels, pollen ramp, ripples, particles, sfx, best record
 // ============================================================
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -189,7 +188,7 @@ function drawRipples() {
   }
 }
 
-// ==================== ★ Scattered fish (slow, individual, replaces clouds) ====================
+// ==================== ★ Scattered fish (slow, individual) ====================
 // 8 independent fish, slow drifting, no schools
 let fishSchools = Array.from({length: 8}, (_, i) => {
   const dir = i % 2 === 0 ? 1 : -1;
@@ -197,10 +196,10 @@ let fishSchools = Array.from({length: 8}, (_, i) => {
     x: Math.random() * W,
     y: 60 + Math.random() * 420,                 // scattered vertically
     dir,
-    spd: (0.08 + Math.random() * 0.12) * dir,    // ★ slow: 0.08~0.2 px/frame
+    spd: (0.08 + Math.random() * 0.12) * dir,    // slow: 0.08~0.2 px/frame
     s: 0.55 + Math.random() * 0.55,              // varied size
-    n: 1,                                        // ★ individual, not a school
-    hue: 150 + Math.random() * 70                // teal→warm, blends with green bg
+    n: 1,                                        // individual, not a school
+    hue: 150 + Math.random() * 70                // blends with green bg
   };
 });
 
@@ -487,9 +486,9 @@ function roundRect(x, y, w, h, r) {
 // ---- ★ Backdrop: green-tinted lake (matches v23 palette) ----
 function drawWater() {
   const lake = ctx.createLinearGradient(0, 0, 0, H);
-  lake.addColorStop(0, '#bfe8d8');      // near-surface: pale teal-green (v23 sky family)
-  lake.addColorStop(0.55, '#7cc9a2');   // mid: green-teal (v23 hill family)
-  lake.addColorStop(1, '#3e8a68');      // depths: dark green (v23 meadow, darkened)
+  lake.addColorStop(0, '#bfe8d8');      // near-surface: pale teal-green
+  lake.addColorStop(0.55, '#7cc9a2');   // mid: green-teal
+  lake.addColorStop(1, '#3e8a68');      // depths: dark green
   ctx.fillStyle = lake;
   ctx.fillRect(0, 0, W, H);
 
@@ -501,14 +500,14 @@ function drawWater() {
 function drawLakebed() {
   const DEEP = 1600;   // covers the max climb height (12 × 115 = 1380)
 
-  // Green underwater hills (v23 meadow palette, submerged)
+  // Green underwater hills
   const meadow = ctx.createLinearGradient(0, H-80, 0, H+40);
   meadow.addColorStop(0, '#7ab868');
   meadow.addColorStop(1, '#4e8a4e');
   ctx.fillStyle = meadow;
   ctx.fillRect(0, H-80, W, DEEP + 200);
 
-  // Hill silhouette (v23 curve)
+  // Hill silhouette
   ctx.fillStyle = 'rgba(90,150,110,.5)';
   ctx.beginPath();
   ctx.moveTo(0, H-40);
