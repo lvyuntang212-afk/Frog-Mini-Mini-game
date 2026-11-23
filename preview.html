@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Frog Hop · Lake Adventure</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin:0; min-height:100vh;
+    display:flex; flex-direction:column;
+    justify-content:center; align-items:center; gap:14px;
+    font-family:'Avenir','Segoe UI','Helvetica Neue',Arial,sans-serif;
+    background:linear-gradient(160deg,#0d1f14 0%,#1a3a26 60%,#2a5c3d 100%);
+    touch-action:manipulation;
+  }
+  .title-bar {
+    color:#aee8c5; font-size:22px; font-weight:bold; letter-spacing:6px;
+    text-shadow:0 0 12px rgba(126,255,180,.4);
+  }
+  #game {
+    display:block; border-radius:18px;
+    max-width:100%; height:auto;
+    box-shadow:0 0 0 4px rgba(255,255,255,.08),
+               0 0 40px rgba(80,220,140,.25),
+               0 20px 50px rgba(0,0,0,.5);
+  }
+  .tips { color:#6fae8b; font-size:13px; letter-spacing:1px; }
+  @keyframes shake {
+    0%,100%{transform:translate(0,0)} 20%{transform:translate(-6px,3px)}
+    40%{transform:translate(5px,-4px)} 60%{transform:translate(-4px,-3px)}
+    80%{transform:translate(4px,4px)}
+  }
+  .shaking { animation: shake .4s ease; }
+</style>
+</head>
+<body>
+
+<div class="title-bar">🐸 FROG HOP</div>
+<canvas id="game" width="400" height="600"></canvas>
+<div class="tips">Space / Tap to Jump &nbsp;·&nbsp; Rise to the Surface! &nbsp;·&nbsp; Dodge Pollen &nbsp;·&nbsp; 12 Pads × 3 Levels</div>
+
+<script>
+// ============================================================
+//  Frog Hop · Lake Adventure — v25 (Final Prototype)
+//  Theme: GREEN underwater lake (v23 palette, submerged feel)
+//   · Backdrop: green-tinted lake gradient (#bfe8d8 → #3e8a68)
+//   · 8 scattered individual fish, slow drifting (0.08~0.2),
+//     tail wiggle, 30% camera parallax — no schools
+//   · Lakebed: green hills + mossy rocks + swaying seaweed
+//   · God rays + rising bubbles for the underwater feel
+//  Gameplay kept intact: full-climb smooth camera (ANCHOR .50
+//  / SMOOTH .07, frame-rate independent), 12 pads × 3 levels,
+//  pollen ramp, ripples, particles, sfx, best record
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const WIN_LEVEL     = 12;
+const LEVEL_GAP     = 115;
+const BOTTOM_Y      = H - 70;
+const TOTAL_STAGES  = 3;
+
+// ==================== Camera (pure smooth follow) ====================
+let cameraY = 0;             // world offset; screenY = worldY - cameraY
+const CAM_ANCHOR = 0.50;     // frog's target screen position (50% height)
+const CAM_SMOOTH = 0.07;     // smoothness knob: smaller = silkier
+let lastTime = performance.now();
+
+// ==================== SFX (Web Audio synthesis) ====================
+let audioCtx = null;
+function playTone(freq, duration, type = 'sine', volume = 0.3, slideTo = null) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, audioCtx.currentTime + duration);
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+  } catch (e) {}
+}
+const sfx = {
+  jump:   () => playTone(300, 0.15, 'sine',   0.25, 600),
+  score:  () => playTone(880, 0.12, 'triangle',0.3, 1320),
+  win:    () => { [523,659,784,1047].forEach((f,i)=>setTimeout(()=>playTone(f,0.2,'triangle',0.3),i*120)); },
+  lose:   () => playTone(220, 0.5,  'sawtooth',0.25, 80),
+  splash: () => playTone(500, 0.12, 'sine',   0.12, 200),
+  click:  () => playTone(600, 0.08, 'square', 0.15)
+};
+
+// ==================== Global state ====================
+let scene = 'start';
+let stage = 1;
+let score = 0;
+let transitionTimer = 0;
+let flashTimer = 0;
+let flashX = 0, flashY = 0;   // world coords
+let pageStartTime = Date.now();
+let bestStage = +(localStorage.getItem('frogBestStage') || 0);
+
+function stageConfig(s) {
+  return {
+    pollenInterval: 110 - s * 20,
+    pollenSpeed:    1.5 + s * 0.5,
+    maxPollens:     1 + s
+  };
+}
+let cfg = stageConfig(1);
+
+// ==================== Frog ====================
+const frog = {
+  level: 0, x: W/2, y: BOTTOM_Y, targetY: BOTTOM_Y,
+  jumping: false, scaleY: 1
+};
+const JUMP_SPEED = 8;
+
+// ============ Lily pads (13 pads · wide spacing · alternating sides) ============
+const PAD_SIZE = 80;
+const padX = [
+  W*0.70, W*0.25, W*0.72, W*0.22, W*0.70, W*0.26, W*0.68,
+  W*0.24, W*0.71, W*0.23, W*0.69, W*0.25, W*0.70
+];
+function padY(lv) { return BOTTOM_Y - lv * LEVEL_GAP; }   // world coords
+function padW()   { return PAD_SIZE; }
+
+// ==================== Pollen (world coords) ====================
+let pollens = [];
+let pollenTimer = 0;
+
+// ==================== Particles (world coords) ====================
+let particles = [];
+function burst(x, y, colors, count = 15, power = 4) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = Math.random() * power + 1;
+    particles.push({
+      x, y,
+      vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd - 2,
+      life: 1, decay: 0.02 + Math.random()*0.02,
+      size: 3 + Math.random()*3,
+      color: colors[Math.floor(Math.random()*colors.length)]
+    });
+  }
+}
+function updateParticles() {
+  for (let i = particles.length-1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.15;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ==================== Ripples (soft landing feedback rings) ====================
+let ripples = [];
+function spawnRipple(x, y, padRadius) {
+  ripples.push({ x, y, r: padRadius * 1.05, alpha: 0.8, speed: 1.0, decay: 0.008 });
+}
+function updateRipples() {
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const rp = ripples[i];
+    rp.r += rp.speed;
+    rp.alpha -= rp.decay;
+    if (rp.alpha <= 0) ripples.splice(i, 1);
+  }
+}
+function drawRipples() {
+  for (const rp of ripples) {
+    ctx.strokeStyle = `rgba(255,255,255,${rp.alpha})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(rp.x, rp.y, rp.r, rp.r * 0.4, 0, 0, Math.PI*2);
+    ctx.stroke();
+  }
+}
+
+// ==================== ★ Scattered fish (slow, individual, replaces clouds) ====================
+// 8 independent fish, slow drifting, no schools
+let fishSchools = Array.from({length: 8}, (_, i) => {
+  const dir = i % 2 === 0 ? 1 : -1;
+  return {
+    x: Math.random() * W,
+    y: 60 + Math.random() * 420,                 // scattered vertically
+    dir,
+    spd: (0.08 + Math.random() * 0.12) * dir,    // ★ slow: 0.08~0.2 px/frame
+    s: 0.55 + Math.random() * 0.55,              // varied size
+    n: 1,                                        // ★ individual, not a school
+    hue: 150 + Math.random() * 70                // teal→warm, blends with green bg
+  };
+});
+
+function drawFishShape(x, y, s, hue, t) {
+  const tail = Math.sin(t) * 3 * s;              // tail wiggle
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.fillStyle = `hsla(${hue},70%,60%,.75)`;
+  // body
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 10, 5.5, 0, 0, Math.PI*2);
+  ctx.fill();
+  // tail (wiggling)
+  ctx.beginPath();
+  ctx.moveTo(-8, 0);
+  ctx.lineTo(-15, -4 + tail);
+  ctx.lineTo(-15,  4 + tail);
+  ctx.closePath();
+  ctx.fill();
+  // eye
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.beginPath(); ctx.arc(4, -1.5, 1.8, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.8)';
+  ctx.beginPath(); ctx.arc(4.5, -1.5, 0.9, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawFishLayer() {
+  const t = Date.now() / 250;                    // slow tail beat
+  for (const f of fishSchools) {
+    f.x += f.spd;
+    // wrap around horizontally
+    if (f.x > W + 80)  f.x = -80;
+    if (f.x < -80)     f.x = W + 80;
+    // vertical parallax: 30% camera speed, wrap
+    const y = f.y - cameraY * 0.3;
+    const yy = ((y % (H + 200)) + H + 200) % (H + 200) - 60;
+
+    // individual fish: gentle vertical bob only
+    const oy = Math.sin(t * 0.6 + f.y) * 4;
+    drawFishShape(f.x, yy + oy, f.s, f.hue, t * 1.5);
+  }
+}
+
+// ==================== ★ God rays (underwater light shafts) ====================
+function drawGodRays() {
+  ctx.save();
+  ctx.globalAlpha = 0.10;
+  ctx.fillStyle = '#f2fff5';
+  const t = Date.now()/3000;
+  for (let i = 0; i < 3; i++) {
+    const cx = W*0.2 + i*W*0.3 + Math.sin(t + i*2)*20;
+    ctx.beginPath();
+    ctx.moveTo(cx - 25, -20);
+    ctx.lineTo(cx + 25, -20);
+    ctx.lineTo(cx + 90, H);
+    ctx.lineTo(cx - 90, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ==================== ★ Rising bubbles (screen space, looping) ====================
+let bubbles = Array.from({length:18}, () => ({
+  x: Math.random()*W,
+  y: Math.random()*H,
+  r: 2 + Math.random()*4,
+  vy: 0.3 + Math.random()*0.7,
+  wob: Math.random()*Math.PI*2
+}));
+
+function drawBubbles() {
+  ctx.strokeStyle = 'rgba(255,255,255,.45)';
+  ctx.fillStyle = 'rgba(255,255,255,.12)';
+  ctx.lineWidth = 1;
+  for (const b of bubbles) {
+    b.y -= b.vy;
+    b.x += Math.sin(Date.now()/500 + b.wob) * 0.3;
+    if (b.y < -10) { b.y = H + 10; b.x = Math.random()*W; }
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+// ==================== ★ Seaweed (world coords, swaying) ====================
+let seaweeds = [];
+(function makeSeaweed() {
+  const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(54321);
+  for (let i = 0; i < 14; i++) {
+    seaweeds.push({
+      x: 20 + rng() * (W - 40),
+      y: H - 20 - rng() * 30,           // rooted near the lakebed
+      h: 40 + rng() * 60,               // strand height
+      segs: 4 + Math.floor(rng()*3),    // wavy segments
+      sway: rng() * Math.PI * 2,
+      hue: 120 + rng() * 40             // green→teal
+    });
+  }
+})();
+
+function drawSeaweed() {
+  const t = Date.now()/800;
+  ctx.lineCap = 'round';
+  for (const g of seaweeds) {
+    ctx.strokeStyle = `hsla(${g.hue},55%,45%,.8)`;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(g.x, g.y);
+    let px = g.x, py = g.y;
+    for (let i = 1; i <= g.segs; i++) {
+      const seg = g.h / g.segs;
+      const swayAmp = 6 * (i / g.segs);              // more sway higher up
+      const nx = g.x + Math.sin(t + g.sway + i*0.9) * swayAmp;
+      const ny = g.y - seg * i;
+      ctx.quadraticCurveTo(px, (py+ny)/2, nx, ny);
+      px = nx; py = ny;
+    }
+    ctx.stroke();
+    // a leaf or two per strand
+    ctx.fillStyle = `hsla(${g.hue},60%,50%,.7)`;
+    ctx.beginPath();
+    ctx.ellipse(px + 6, py + 8, 7, 3, 0.6, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+// ==================== Lakebed rocks (world coords) ====================
+let rocks = [];
+(function makeRocks() {
+  const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(999);
+  for (let i = 0; i < 10; i++) {
+    rocks.push({
+      x: rng() * W,
+      y: H - 10 - rng() * 50,
+      r: 8 + rng() * 18
+    });
+  }
+})();
+
+// ==================== Input ====================
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); tap(); }
+});
+canvas.addEventListener('pointerdown', tap);
+
+function tap() {
+  if (scene === 'start')        { sfx.click(); startStage(1); }
+  else if (scene === 'levelup') transitionTimer = 0;
+  else if (scene === 'over' || scene === 'finalwin') { sfx.click(); scene = 'start'; pageStartTime = Date.now(); }
+  else if (scene === 'playing' && !frog.jumping && frog.level < WIN_LEVEL) doJump();
+}
+
+function doJump() {
+  frog.level++;
+  frog.targetY = padY(frog.level);
+  frog.jumping = true;
+  frog.scaleY = 1.3;
+  score++;
+  flashTimer = 30;
+  flashX = frog.x; flashY = frog.y;
+  sfx.jump();
+}
+
+function startStage(s) {
+  stage = s;
+  cfg = stageConfig(s);
+  score = 0;
+  cameraY = 0;                                   // reset camera to the lakebed view
+  frog.level = 0; frog.x = padX[0]; frog.y = padY(0);
+  frog.targetY = padY(0); frog.jumping = false; frog.scaleY = 1;
+  pollens = []; pollenTimer = 0;
+  ripples = []; particles = [];
+  pageStartTime = Date.now();
+  scene = 'playing';
+}
+
+function gameOver() {
+  scene = 'over';
+  pageStartTime = Date.now();
+  if (stage > bestStage) {
+    bestStage = stage;
+    localStorage.setItem('frogBestStage', bestStage);
+  }
+  sfx.lose();
+  canvas.classList.remove('shaking');
+  void canvas.offsetWidth;
+  canvas.classList.add('shaking');
+}
+
+function stageClear() {
+  burst(W/2, frog.y, ['#ffd700','#ff6b81','#7fd4ff','#a2ff8f'], 50, 6);
+  sfx.win();
+  if (stage > bestStage) {
+    bestStage = stage;
+    localStorage.setItem('frogBestStage', bestStage);
+  }
+  if (stage >= TOTAL_STAGES) { scene = 'finalwin'; pageStartTime = Date.now(); }
+  else { scene = 'levelup'; transitionTimer = 150; }
+}
+
+// ==================== Update ====================
+function update() {
+  // ---- Frame-rate independent timing (normalized to 60fps steps) ----
+  const now = performance.now();
+  const dt = Math.min(50, now - lastTime) / 16.67;
+  lastTime = now;
+
+  if (scene === 'levelup') {
+    if (--transitionTimer <= 0) startStage(stage + 1);
+    updateParticles();
+    updateRipples();
+    return;
+  }
+  if (flashTimer > 0) flashTimer--;
+  updateParticles();
+  updateRipples();
+  if (scene !== 'playing') return;
+
+  if (frog.jumping) {
+    frog.y -= JUMP_SPEED;
+    frog.x += (padX[frog.level] - frog.x) * 0.2;
+    if (frog.y <= frog.targetY) {
+      frog.y = frog.targetY;
+      frog.jumping = false;
+      frog.scaleY = 0.7;
+      const pr = padW() / 2;
+      spawnRipple(frog.x, frog.y, pr);
+      setTimeout(() => { if (scene === 'playing') spawnRipple(frog.x, frog.y, pr); }, 150);
+      sfx.splash();
+      burst(frog.x, frog.y + 16, ['#ffd700','#a2ff8f'], 8, 2.5);
+      sfx.score();
+      if (frog.level >= WIN_LEVEL) { stageClear(); return; }
+    }
+  }
+
+  // ---- Camera: smooth follow for the WHOLE climb ----
+  const camTarget = Math.min(0, frog.y - H * CAM_ANCHOR);
+  cameraY += (camTarget - cameraY) * (1 - Math.pow(1 - CAM_SMOOTH, dt));
+
+  // ---- Pollen: spawn just above the visible view ----
+  if (++pollenTimer > cfg.pollenInterval && pollens.length < cfg.maxPollens) {
+    pollenTimer = 0;
+    pollens.push({
+      x: 30 + Math.random()*(W-60),
+      y: cameraY - 20,
+      r: 10,
+      vy: cfg.pollenSpeed + Math.random(),
+      phase: Math.random()*Math.PI*2
+    });
+  }
+
+  for (let i = pollens.length-1; i >= 0; i--) {
+    const pl = pollens[i];
+    pl.y += pl.vy;
+    pl.phase += 0.08;
+    if (pl.y > cameraY + H + 20) { pollens.splice(i,1); continue; }
+    if (Math.hypot(frog.x-pl.x, frog.y-pl.y) < pl.r + 15) {
+      burst(frog.x, frog.y, ['#ff6b81','#e2a900'], 20, 4);
+      gameOver();
+      return;
+    }
+  }
+}
+
+// ============================================================
+//                        Drawing
+// ============================================================
+function easeOut(t) { return 1 - Math.pow(1-t, 3); }
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+// ---- ★ Backdrop: green-tinted lake (matches v23 palette) ----
+function drawWater() {
+  const lake = ctx.createLinearGradient(0, 0, 0, H);
+  lake.addColorStop(0, '#bfe8d8');      // near-surface: pale teal-green (v23 sky family)
+  lake.addColorStop(0.55, '#7cc9a2');   // mid: green-teal (v23 hill family)
+  lake.addColorStop(1, '#3e8a68');      // depths: dark green (v23 meadow, darkened)
+  ctx.fillStyle = lake;
+  ctx.fillRect(0, 0, W, H);
+
+  drawGodRays();
+  drawBubbles();
+}
+
+// ---- Lakebed: green hills + mossy rocks + seaweed (WORLD coords) ----
+function drawLakebed() {
+  const DEEP = 1600;   // covers the max climb height (12 × 115 = 1380)
+
+  // Green underwater hills (v23 meadow palette, submerged)
+  const meadow = ctx.createLinearGradient(0, H-80, 0, H+40);
+  meadow.addColorStop(0, '#7ab868');
+  meadow.addColorStop(1, '#4e8a4e');
+  ctx.fillStyle = meadow;
+  ctx.fillRect(0, H-80, W, DEEP + 200);
+
+  // Hill silhouette (v23 curve)
+  ctx.fillStyle = 'rgba(90,150,110,.5)';
+  ctx.beginPath();
+  ctx.moveTo(0, H-40);
+  ctx.quadraticCurveTo(W*0.25, H-90, W*0.5, H-45);
+  ctx.quadraticCurveTo(W*0.75, H-80, W, H-45);
+  ctx.lineTo(W, H + DEEP);
+  ctx.lineTo(0, H + DEEP);
+  ctx.fill();
+
+  // Mossy rocks
+  for (const r of rocks) {
+    const g = ctx.createRadialGradient(r.x - r.r*0.3, r.y - r.r*0.4, r.r*0.2, r.x, r.y, r.r);
+    g.addColorStop(0, '#7a9a7e');
+    g.addColorStop(1, '#4e6a56');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(r.x, r.y, r.r, r.r*0.75, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Swaying seaweed
+  drawSeaweed();
+}
+
+// ---- Draw the whole world layer, translated by camera ----
+function drawWorld() {
+  ctx.save();
+  ctx.translate(0, -cameraY);
+
+  drawLakebed();
+  drawRipples();
+  for (let lv = 0; lv <= WIN_LEVEL; lv++) drawPad(lv);
+  pollens.forEach(drawPollen);
+  drawFrog();
+  drawParticles();
+
+  // +1 popup (world coords)
+  if (flashTimer > 0 && score > 0) {
+    ctx.fillStyle = `rgba(255,181,32,${flashTimer/30})`;
+    ctx.font = 'bold 30px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('+1', flashX, flashY - 40 - (30-flashTimer));
+  }
+
+  ctx.restore();
+}
+
+// ============ Lily pad (single layer, light palette, organic outline) ============
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function traceSpline(pts) {
+  const N = pts.length;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 0; i < N; i++) {
+    const p0 = pts[(i-1+N)%N], p1 = pts[i],
+          p2 = pts[(i+1)%N],  p3 = pts[(i+2)%N];
+    const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y);
+  }
+  ctx.closePath();
+}
+
+function drawPad(lv) {
+  const x = padX[lv], y = padY(lv);
+  const baseR = padW() / 2;
+  const isGoal = lv === WIN_LEVEL;
+  const rng = makeRng(lv * 1000 + 7);
+
+  const RX = baseR * 1.10, RY = baseR * 0.72;
+  const ellipseR = (a, rx, ry) => (rx * ry) / Math.hypot(ry * Math.cos(a), rx * Math.sin(a));
+
+  const N = 12;
+  let prof = [];
+  for (let i = 0; i < N; i++) prof.push(0.78 + rng() * 0.44);
+  prof = prof.map((v, i) =>
+    (prof[(i-1+N)%N] + 2*v + prof[(i+1)%N]) / 4
+  );
+
+  const tilt = (rng() - 0.5) * 0.5;
+
+  const outerPts = prof.map((p, i) => {
+    const a = (i / N) * Math.PI*2 + tilt;
+    const r = ellipseR(a, RX, RY) * p;
+    return { x: x + Math.cos(a) * r, y: y + Math.sin(a) * r };
+  });
+
+  // Soft water shadow below the pad
+  ctx.fillStyle = 'rgba(20,60,45,.25)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 5, baseR * 1.05, baseR * 0.38, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  traceSpline(outerPts);
+  const g = ctx.createRadialGradient(x - baseR*0.15, y - baseR*0.2, baseR*0.1, x, y, baseR*1.15);
+  if (isGoal) {
+    g.addColorStop(0, '#e4f5b8');
+    g.addColorStop(0.6, '#bde292');
+    g.addColorStop(1, '#8fc76a');
+  } else {
+    g.addColorStop(0, '#d2eb9f');
+    g.addColorStop(0.6, '#a8d47b');
+    g.addColorStop(1, '#7cba55');
+  }
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(90,150,70,.7)';
+  ctx.lineWidth = 1.8;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(100,160,80,.55)';
+  ctx.lineWidth = 1.8;
+  for (let i = 0; i < N; i++) {
+    const prev = prof[(i-1+N)%N], cur = prof[i], next = prof[(i+1)%N];
+    if (cur <= prev && cur <= next) {
+      const a = (i / N) * Math.PI*2 + tilt;
+      const len = ellipseR(a, RX, RY) * cur * 0.88;
+      const ex = x + Math.cos(a) * len;
+      const ey = y + Math.sin(a) * len;
+      const cx = x + Math.cos(a + 0.28) * len * 0.55;
+      const cy = y + Math.sin(a + 0.28) * len * 0.55;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(cx, cy, ex, ey);
+      ctx.stroke();
+    }
+  }
+  ctx.fillStyle = 'rgba(90,150,70,.5)';
+  ctx.beginPath(); ctx.arc(x, y, baseR*0.05, 0, Math.PI*2); ctx.fill();
+
+  // Dew highlights
+  ctx.fillStyle = 'rgba(255,255,255,.7)';
+  const drops = [
+    {dx: -baseR*0.30, dy: -baseR*0.18, rx: baseR*0.10, ry: baseR*0.15, rot: -0.4},
+    {dx:  baseR*0.24, dy:  baseR*0.14, rx: baseR*0.07, ry: baseR*0.11, rot:  0.5},
+    {dx: -baseR*0.02, dy:  baseR*0.30, rx: baseR*0.05, ry: baseR*0.08, rot:  0.2}
+  ];
+  for (const d of drops) {
+    ctx.beginPath();
+    ctx.ellipse(x + d.dx, y + d.dy, d.rx, d.ry, d.rot, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Soft ring arcs around the pad
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 1.5;
+  const arcs = [
+    {a: -2.6, r: baseR*1.30, len: 0.5},
+    {a:  0.6, r: baseR*1.36, len: 0.45},
+    {a:  2.3, r: baseR*1.26, len: 0.4}
+  ];
+  for (const rc of arcs) {
+    ctx.beginPath();
+    ctx.ellipse(x, y, rc.r, rc.r * 0.4, 0, rc.a, rc.a + rc.len);
+    ctx.stroke();
+  }
+}
+
+function drawFrog() {
+  const x = frog.x, y = frog.y;
+
+  const shadowAlpha = frog.jumping ? 0.12 : 0.25;
+  const shadowScale = frog.jumping ? 0.6 : 1;
+  ctx.fillStyle = `rgba(0,30,50,${shadowAlpha})`;
+  ctx.beginPath();
+  ctx.ellipse(x, y+18, 20*shadowScale, 6*shadowScale, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  frog.scaleY += (1 - frog.scaleY) * 0.15;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(1/frog.scaleY, frog.scaleY);
+
+  ctx.fillStyle = '#4a9422';
+  ctx.beginPath(); ctx.ellipse(-18, 12, 11, 6, .4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( 18, 12, 11, 6, -.4, 0, Math.PI*2); ctx.fill();
+
+  const bg = ctx.createRadialGradient(-6, -8, 4, 0, 0, 24);
+  bg.addColorStop(0, '#8be05a');
+  bg.addColorStop(1, '#4a9422');
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.ellipse(0, 0, 21, 18, 0, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#f2ffd9';
+  ctx.beginPath(); ctx.ellipse(0, 7, 12, 8, 0, 0, Math.PI*2); ctx.fill();
+
+  for (const ex of [-8, 8]) {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(ex, -11, 6.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(ex, -12, 2.8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.beginPath(); ctx.arc(ex-1.5, -13.5, 1, 0, Math.PI*2); ctx.fill();
+  }
+
+  ctx.fillStyle = 'rgba(255,120,120,.35)';
+  ctx.beginPath(); ctx.ellipse(-13, -2, 4, 2.5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( 13, -2, 4, 2.5, 0, 0, Math.PI*2); ctx.fill();
+
+  ctx.strokeStyle = '#2c6e14'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(0, -3, 6, 0.3, Math.PI-0.3); ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawPollen(pl) {
+  const glow = ctx.createRadialGradient(pl.x, pl.y, 2, pl.x, pl.y, pl.r*2.2);
+  glow.addColorStop(0, 'rgba(255,220,90,.5)');
+  glow.addColorStop(1, 'rgba(255,220,90,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(pl.x, pl.y, pl.r*2.2, 0, Math.PI*2); ctx.fill();
+
+  ctx.save();
+  ctx.translate(pl.x, pl.y);
+  ctx.rotate(pl.phase);
+  ctx.fillStyle = '#f7d354';
+  for (let a = 0; a < 6; a++) {
+    ctx.rotate(Math.PI/3);
+    ctx.beginPath(); ctx.ellipse(0, -pl.r*0.8, 4.5, 7, 0, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.fillStyle = '#fff3b0';
+  ctx.beginPath(); ctx.arc(0, 0, pl.r*0.55, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#e2a900';
+  ctx.beginPath(); ctx.arc(0, 0, pl.r*0.3, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+// ---------- UI components ----------
+function drawButton(x, y, w, h, text, color1, color2) {
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  roundRect(x, y+4, w, h, h/2); ctx.fill();
+  const g = ctx.createLinearGradient(x, y, x, y+h);
+  g.addColorStop(0, color1);
+  g.addColorStop(1, color2);
+  ctx.fillStyle = g;
+  roundRect(x, y, w, h, h/2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.3)';
+  roundRect(x+8, y+5, w-16, h*0.35, h*0.18); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, x+w/2, y+h/2+1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ============================================================
+//        Start Page — underwater green design
+// ============================================================
+function drawStartPage() {
+  drawWater();
+  drawFishLayer();
+  drawLakebed();
+
+  const bob = Math.sin(Date.now()/600) * 5;
+  frog.x = W/2; frog.y = 300 + bob;
+  drawFrog();
+
+  const t = Math.min(1, (Date.now() - pageStartTime) / 400);
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.globalAlpha = t;
+  ctx.translate(W/2, 110);
+  ctx.font = 'bold 48px sans-serif';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = '#0d3a28';
+  ctx.lineJoin = 'round';
+  ctx.strokeText('FROG HOP', 0, 0);
+  ctx.fillStyle = '#a8e6c8';
+  ctx.fillText('FROG HOP', 0, 0);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = t;
+  ctx.fillStyle = 'rgba(30,80,55,.8)';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('Rise to the surface · Dodge the pollen', W/2, 145);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = t;
+  const hints = [
+    { icon: '👆', label: 'TAP',      x: W/2 - 90 },
+    { icon: '🌸', label: 'AVOID',    x: W/2 },
+    { icon: '🏆', label: '12 WINS',  x: W/2 + 90 }
+  ];
+  for (const h of hints) {
+    ctx.font = '26px sans-serif';
+    ctx.fillText(h.icon, h.x, 415);
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillStyle = 'rgba(30,80,55,.7)';
+    ctx.fillText(h.label, h.x, 436);
+  }
+  ctx.restore();
+
+  if (bestStage > 0) {
+    ctx.fillStyle = 'rgba(184,134,11,.9)';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Best · Level ${bestStage}`, W/2, 470);
+  }
+
+  const pulse = 1 + Math.sin(Date.now()/400)*0.02;
+  ctx.save();
+  ctx.translate(W/2, 525);
+  ctx.scale(pulse, pulse);
+  drawButton(-100, -27, 200, 54, 'START', '#43c268', '#2e8b57');
+  ctx.restore();
+}
+
+// ---------- HUD (screen space) ----------
+function drawHUD() {
+  ctx.fillStyle = '#f0a24a';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Level ${stage} / ${TOTAL_STAGES}`, 10, 28);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(15,55,40,.7)';
+  ctx.strokeText(`Score: ${score} / ${WIN_LEVEL}`, 10, 54);
+  ctx.fillStyle = '#ffb520';
+  ctx.fillText(`Score: ${score} / ${WIN_LEVEL}`, 10, 54);
+}
+
+function drawLevelUpPage() {
+  ctx.fillStyle = 'rgba(15,50,35,0.85)';
+  ctx.fillRect(0, 0, W, H);
+  drawParticles();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 42px sans-serif';
+  ctx.fillText('🎉 LEVEL CLEAR!', W/2, H/2 - 70);
+  ctx.fillStyle = '#fff';
+  ctx.font = '22px sans-serif';
+  ctx.fillText(`Level ${stage} complete! Score ${WIN_LEVEL}`, W/2, H/2 - 10);
+  const t = Math.ceil(transitionTimer / 60);
+  ctx.font = '18px sans-serif';
+  ctx.fillStyle = '#a8e6c8';
+  ctx.fillText(`Entering Level ${stage+1} (harder)… ${t}`, W/2, H/2 + 40);
+  ctx.font = '14px sans-serif';
+  ctx.fillText('Next level: faster & denser pollen', W/2, H/2 + 75);
+  ctx.fillStyle = '#6fae8b';
+  ctx.fillText('Tap to continue now ▶', W/2, H/2 + 110);
+}
+
+function drawOverPage() {
+  drawWater();
+  drawFishLayer();
+  drawWorld();
+  ctx.fillStyle = 'rgba(100,20,10,0.5)';
+  ctx.fillRect(0, 0, W, H);
+  const t = Math.min(1, (Date.now() - pageStartTime) / 400);
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.translate(W/2, H/2 - 50 + 30*(1-easeOut(t)));
+  ctx.globalAlpha = t;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 38px sans-serif';
+  ctx.fillText('💀 GAME OVER', 0, 0);
+  ctx.font = '20px sans-serif';
+  ctx.fillText('The frog hit some pollen…', 0, 40);
+  ctx.fillText(`Stopped at Level ${stage}, pad ${frog.level}`, 0, 72);
+  ctx.restore();
+  ctx.fillStyle = '#c0392b';
+  roundRect(W/2-100, H/2+80, 200, 50, 25); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('TRY AGAIN', W/2, H/2+113);
+}
+
+function drawFinalWinPage() {
+  ctx.fillStyle = '#1a4a34';
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 40; i++) {
+    const x = (i*97 + Date.now()/50) % W;
+    const y = (i*53 + Date.now()/20) % H;
+    ctx.fillStyle = ['#ffd700','#ff6b81','#7fd4ff','#a2ff8f'][i%4];
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
+  }
+  drawBubbles();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 42px sans-serif';
+  ctx.fillText('🏆 SURFACED IN TRIUMPH!', W/2, H/2 - 80);
+  ctx.fillStyle = '#fff';
+  ctx.font = '22px sans-serif';
+  ctx.fillText('The frog conquered every lily pad!', W/2, H/2 - 20);
+  ctx.font = '18px sans-serif';
+  ctx.fillStyle = '#a8e6c8';
+  ctx.fillText(`Levels: ${TOTAL_STAGES} · Total Score: ${WIN_LEVEL * TOTAL_STAGES}`, W/2, H/2 + 20);
+  if (bestStage >= TOTAL_STAGES) {
+    ctx.fillStyle = '#ffd700';
+    ctx.fillText('🏅 You\'ve beaten every level!', W/2, H/2 + 50);
+  }
+  drawButton(W/2-100, H/2+80, 200, 50, 'PLAY AGAIN', '#43c268', '#2e8b57');
+}
+
+// ==================== Main loop ====================
+(function loop() {
+  update();
+  ctx.clearRect(0, 0, W, H);
+  switch (scene) {
+    case 'start':
+      drawStartPage();
+      break;
+    case 'playing':
+      drawWater();
+      drawFishLayer();
+      drawWorld();
+      drawHUD();
+      break;
+    case 'levelup':
+      drawWater();
+      drawFishLayer();
+      drawWorld();
+      drawHUD();
+      drawLevelUpPage();
+      break;
+    case 'over':
+      drawOverPage();
+      break;
+    case 'finalwin':
+      drawFinalWinPage();
+      break;
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
