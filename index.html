@@ -2,29 +2,31 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Frog Hop · Lake Adventure</title>
 <style>
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin:0; min-height:100vh;
+    margin:0;
     display:flex; flex-direction:column;
-    justify-content:flex-start; align-items:center; gap:0;
+    justify-content:center; align-items:center;
     font-family:'Avenir','Segoe UI','Helvetica Neue',Arial,sans-serif;
     background:linear-gradient(160deg,#0d1f14 0%,#1a3a26 60%,#2a5c3d 100%);
     touch-action:manipulation;
+    overflow:hidden;
   }
-  #game {
-    display:block;
-    max-width:100%; height:auto;
-    box-shadow:0 20px 50px rgba(0,0,0,.5);
-  }
-  /* 手机上铺满竖屏、无圆角 */
+  #game { display:block; }
+  /* 手机端：铺满整屏，无圆角无阴影无留白 */
   @media (max-width: 500px) {
+    body { justify-content:flex-start; }
     #game {
-      width:100vw; max-width:100vw;
+      width:100vw;
+      height:100vh;
+      height:100dvh;   /* 动态视口高度：兼容手机地址栏收起/展开 */
       border-radius:0;
       box-shadow:none;
+      object-fit:cover; /* 按比例铺满，多余边缘裁切，不变形不留白 */
     }
   }
   @keyframes shake {
@@ -37,23 +39,33 @@
 </head>
 <body>
 
-<canvas id="game" width="400" height="600"></canvas>
+<canvas id="game"></canvas>
 
 <script>
 // ============================================================
-//  Frog Hop · Lake Adventure — v26 (Final Prototype)
-//  UI: header bar & tips removed; canvas fills mobile viewport
-//  Theme: GREEN underwater lake (v23 palette, submerged feel)
-//   · Backdrop: green-tinted lake gradient (#bfe8d8 → #3e8a68)
-//   · 8 scattered individual fish, slow drifting, tail wiggle,
-//     30% camera parallax — no schools
-//   · Lakebed: green hills + mossy rocks + swaying seaweed
-//   · God rays + rising bubbles for the underwater feel
-//  Gameplay kept intact: full-climb smooth camera, 12 pads ×
-//  3 levels, pollen ramp, ripples, particles, sfx, best record
+//  Frog Hop · Lake Adventure — v27 (Mobile-adapted Final)
+//  Canvas: dynamically sized to the phone screen ratio
+//   · width fixed at 400, height = 400 × (screenH / screenW)
+//   · CSS scales it to fill 100vw × 100dvh with object-fit:cover
+//   → no empty strip at the bottom on tall phones
+//  Theme: GREEN underwater lake (v23 palette)
+//  Gameplay: full-climb smooth camera, 12 pads × 3 levels,
+//  pollen ramp, ripples, particles, sfx, best record
 // ============================================================
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+
+// ---- ★ Canvas sizing: match the phone screen aspect ratio ----
+function fitCanvas() {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  canvas.width  = 400;
+  // 生成与屏幕相同比例的内部分辨率，限制在 520~900 保证可玩性
+  canvas.height = Math.min(Math.max(Math.round(400 * vh / vw), 520), 900);
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+window.addEventListener('orientationchange', () => setTimeout(fitCanvas, 100));
+
 const W = canvas.width, H = canvas.height;
 
 const WIN_LEVEL     = 12;
@@ -119,7 +131,7 @@ const frog = {
 };
 const JUMP_SPEED = 8;
 
-// ============ Lily pads (13 pads · wide spacing · alternating sides) ============
+// ============ Lily pads (13 pads · alternating sides) ============
 const PAD_SIZE = 80;
 const padX = [
   W*0.70, W*0.25, W*0.72, W*0.22, W*0.70, W*0.26, W*0.68,
@@ -165,7 +177,7 @@ function drawParticles() {
   ctx.globalAlpha = 1;
 }
 
-// ==================== Ripples (soft landing feedback rings) ====================
+// ==================== Ripples ====================
 let ripples = [];
 function spawnRipple(x, y, padRadius) {
   ripples.push({ x, y, r: padRadius * 1.05, alpha: 0.8, speed: 1.0, decay: 0.008 });
@@ -188,39 +200,38 @@ function drawRipples() {
   }
 }
 
-// ==================== ★ Scattered fish (slow, individual) ====================
-// 8 independent fish, slow drifting, no schools
-let fishSchools = Array.from({length: 8}, (_, i) => {
-  const dir = i % 2 === 0 ? 1 : -1;
-  return {
-    x: Math.random() * W,
-    y: 60 + Math.random() * 420,                 // scattered vertically
-    dir,
-    spd: (0.08 + Math.random() * 0.12) * dir,    // slow: 0.08~0.2 px/frame
-    s: 0.55 + Math.random() * 0.55,              // varied size
-    n: 1,                                        // individual, not a school
-    hue: 150 + Math.random() * 70                // blends with green bg
-  };
-});
+// ==================== Scattered fish (slow, individual) ====================
+let fishSchools = [];
+(function initFish() {
+  const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(777);
+  fishSchools = Array.from({length: 8}, (_, i) => {
+    const dir = i % 2 === 0 ? 1 : -1;
+    return {
+      x: rng() * W,
+      y: 60 + rng() * (H - 160),                // scattered over the taller canvas
+      dir,
+      spd: (0.08 + rng() * 0.12) * dir,         // slow drift
+      s: 0.55 + rng() * 0.55,
+      hue: 150 + rng() * 70
+    };
+  });
+})();
 
 function drawFishShape(x, y, s, hue, t) {
-  const tail = Math.sin(t) * 3 * s;              // tail wiggle
+  const tail = Math.sin(t) * 3 * s;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(s, s);
   ctx.fillStyle = `hsla(${hue},70%,60%,.75)`;
-  // body
   ctx.beginPath();
   ctx.ellipse(0, 0, 10, 5.5, 0, 0, Math.PI*2);
   ctx.fill();
-  // tail (wiggling)
   ctx.beginPath();
   ctx.moveTo(-8, 0);
   ctx.lineTo(-15, -4 + tail);
   ctx.lineTo(-15,  4 + tail);
   ctx.closePath();
   ctx.fill();
-  // eye
   ctx.fillStyle = 'rgba(255,255,255,.9)';
   ctx.beginPath(); ctx.arc(4, -1.5, 1.8, 0, Math.PI*2); ctx.fill();
   ctx.fillStyle = 'rgba(0,0,0,.8)';
@@ -229,23 +240,19 @@ function drawFishShape(x, y, s, hue, t) {
 }
 
 function drawFishLayer() {
-  const t = Date.now() / 250;                    // slow tail beat
+  const t = Date.now() / 250;
   for (const f of fishSchools) {
     f.x += f.spd;
-    // wrap around horizontally
     if (f.x > W + 80)  f.x = -80;
     if (f.x < -80)     f.x = W + 80;
-    // vertical parallax: 30% camera speed, wrap
     const y = f.y - cameraY * 0.3;
     const yy = ((y % (H + 200)) + H + 200) % (H + 200) - 60;
-
-    // individual fish: gentle vertical bob only
     const oy = Math.sin(t * 0.6 + f.y) * 4;
     drawFishShape(f.x, yy + oy, f.s, f.hue, t * 1.5);
   }
 }
 
-// ==================== ★ God rays (underwater light shafts) ====================
+// ==================== God rays ====================
 function drawGodRays() {
   ctx.save();
   ctx.globalAlpha = 0.10;
@@ -264,14 +271,18 @@ function drawGodRays() {
   ctx.restore();
 }
 
-// ==================== ★ Rising bubbles (screen space, looping) ====================
-let bubbles = Array.from({length:18}, () => ({
-  x: Math.random()*W,
-  y: Math.random()*H,
-  r: 2 + Math.random()*4,
-  vy: 0.3 + Math.random()*0.7,
-  wob: Math.random()*Math.PI*2
-}));
+// ==================== Rising bubbles ====================
+let bubbles = [];
+(function initBubbles() {
+  const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(313);
+  bubbles = Array.from({length:18}, () => ({
+    x: rng()*W,
+    y: rng()*H,
+    r: 2 + rng()*4,
+    vy: 0.3 + rng()*0.7,
+    wob: rng()*Math.PI*2
+  }));
+})();
 
 function drawBubbles() {
   ctx.strokeStyle = 'rgba(255,255,255,.45)';
@@ -288,18 +299,18 @@ function drawBubbles() {
   }
 }
 
-// ==================== ★ Seaweed (world coords, swaying) ====================
+// ==================== Seaweed (world coords) ====================
 let seaweeds = [];
 (function makeSeaweed() {
   const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(54321);
   for (let i = 0; i < 14; i++) {
     seaweeds.push({
       x: 20 + rng() * (W - 40),
-      y: H - 20 - rng() * 30,           // rooted near the lakebed
-      h: 40 + rng() * 60,               // strand height
-      segs: 4 + Math.floor(rng()*3),    // wavy segments
+      y: H - 20 - rng() * 30,
+      h: 40 + rng() * 60,
+      segs: 4 + Math.floor(rng()*3),
       sway: rng() * Math.PI * 2,
-      hue: 120 + rng() * 40             // green→teal
+      hue: 120 + rng() * 40
     });
   }
 })();
@@ -315,14 +326,13 @@ function drawSeaweed() {
     let px = g.x, py = g.y;
     for (let i = 1; i <= g.segs; i++) {
       const seg = g.h / g.segs;
-      const swayAmp = 6 * (i / g.segs);              // more sway higher up
+      const swayAmp = 6 * (i / g.segs);
       const nx = g.x + Math.sin(t + g.sway + i*0.9) * swayAmp;
       const ny = g.y - seg * i;
       ctx.quadraticCurveTo(px, (py+ny)/2, nx, ny);
       px = nx; py = ny;
     }
     ctx.stroke();
-    // a leaf or two per strand
     ctx.fillStyle = `hsla(${g.hue},60%,50%,.7)`;
     ctx.beginPath();
     ctx.ellipse(px + 6, py + 8, 7, 3, 0.6, 0, Math.PI*2);
@@ -330,7 +340,7 @@ function drawSeaweed() {
   }
 }
 
-// ==================== Lakebed rocks (world coords) ====================
+// ==================== Lakebed rocks ====================
 let rocks = [];
 (function makeRocks() {
   const rng = (s => () => (s = (s*1664525+1013904223)>>>0, s/4294967296))(999);
@@ -371,7 +381,7 @@ function startStage(s) {
   stage = s;
   cfg = stageConfig(s);
   score = 0;
-  cameraY = 0;                                   // reset camera to the lakebed view
+  cameraY = 0;
   frog.level = 0; frog.x = padX[0]; frog.y = padY(0);
   frog.targetY = padY(0); frog.jumping = false; frog.scaleY = 1;
   pollens = []; pollenTimer = 0;
@@ -406,7 +416,6 @@ function stageClear() {
 
 // ==================== Update ====================
 function update() {
-  // ---- Frame-rate independent timing (normalized to 60fps steps) ----
   const now = performance.now();
   const dt = Math.min(50, now - lastTime) / 16.67;
   lastTime = now;
@@ -439,11 +448,9 @@ function update() {
     }
   }
 
-  // ---- Camera: smooth follow for the WHOLE climb ----
   const camTarget = Math.min(0, frog.y - H * CAM_ANCHOR);
   cameraY += (camTarget - cameraY) * (1 - Math.pow(1 - CAM_SMOOTH, dt));
 
-  // ---- Pollen: spawn just above the visible view ----
   if (++pollenTimer > cfg.pollenInterval && pollens.length < cfg.maxPollens) {
     pollenTimer = 0;
     pollens.push({
@@ -483,12 +490,12 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-// ---- ★ Backdrop: green-tinted lake (matches v23 palette) ----
+// ---- Backdrop: green-tinted lake ----
 function drawWater() {
   const lake = ctx.createLinearGradient(0, 0, 0, H);
-  lake.addColorStop(0, '#bfe8d8');      // near-surface: pale teal-green
-  lake.addColorStop(0.55, '#7cc9a2');   // mid: green-teal
-  lake.addColorStop(1, '#3e8a68');      // depths: dark green
+  lake.addColorStop(0, '#bfe8d8');
+  lake.addColorStop(0.55, '#7cc9a2');
+  lake.addColorStop(1, '#3e8a68');
   ctx.fillStyle = lake;
   ctx.fillRect(0, 0, W, H);
 
@@ -496,18 +503,16 @@ function drawWater() {
   drawBubbles();
 }
 
-// ---- Lakebed: green hills + mossy rocks + seaweed (WORLD coords) ----
+// ---- Lakebed (WORLD coords) ----
 function drawLakebed() {
-  const DEEP = 1600;   // covers the max climb height (12 × 115 = 1380)
+  const DEEP = 1600;
 
-  // Green underwater hills
   const meadow = ctx.createLinearGradient(0, H-80, 0, H+40);
   meadow.addColorStop(0, '#7ab868');
   meadow.addColorStop(1, '#4e8a4e');
   ctx.fillStyle = meadow;
   ctx.fillRect(0, H-80, W, DEEP + 200);
 
-  // Hill silhouette
   ctx.fillStyle = 'rgba(90,150,110,.5)';
   ctx.beginPath();
   ctx.moveTo(0, H-40);
@@ -517,7 +522,6 @@ function drawLakebed() {
   ctx.lineTo(0, H + DEEP);
   ctx.fill();
 
-  // Mossy rocks
   for (const r of rocks) {
     const g = ctx.createRadialGradient(r.x - r.r*0.3, r.y - r.r*0.4, r.r*0.2, r.x, r.y, r.r);
     g.addColorStop(0, '#7a9a7e');
@@ -528,11 +532,9 @@ function drawLakebed() {
     ctx.fill();
   }
 
-  // Swaying seaweed
   drawSeaweed();
 }
 
-// ---- Draw the whole world layer, translated by camera ----
 function drawWorld() {
   ctx.save();
   ctx.translate(0, -cameraY);
@@ -544,7 +546,6 @@ function drawWorld() {
   drawFrog();
   drawParticles();
 
-  // +1 popup (world coords)
   if (flashTimer > 0 && score > 0) {
     ctx.fillStyle = `rgba(255,181,32,${flashTimer/30})`;
     ctx.font = 'bold 30px sans-serif';
@@ -555,8 +556,7 @@ function drawWorld() {
   ctx.restore();
 }
 
-// ============ Lily pad (single layer, light palette, organic outline) ============
-
+// ============ Lily pad ============
 function makeRng(seed) {
   let s = seed >>> 0;
   return () => {
@@ -603,7 +603,6 @@ function drawPad(lv) {
     return { x: x + Math.cos(a) * r, y: y + Math.sin(a) * r };
   });
 
-  // Soft water shadow below the pad
   ctx.fillStyle = 'rgba(20,60,45,.25)';
   ctx.beginPath();
   ctx.ellipse(x, y + 5, baseR * 1.05, baseR * 0.38, 0, 0, Math.PI*2);
@@ -647,7 +646,6 @@ function drawPad(lv) {
   ctx.fillStyle = 'rgba(90,150,70,.5)';
   ctx.beginPath(); ctx.arc(x, y, baseR*0.05, 0, Math.PI*2); ctx.fill();
 
-  // Dew highlights
   ctx.fillStyle = 'rgba(255,255,255,.7)';
   const drops = [
     {dx: -baseR*0.30, dy: -baseR*0.18, rx: baseR*0.10, ry: baseR*0.15, rot: -0.4},
@@ -660,7 +658,6 @@ function drawPad(lv) {
     ctx.fill();
   }
 
-  // Soft ring arcs around the pad
   ctx.strokeStyle = 'rgba(255,255,255,.35)';
   ctx.lineWidth = 1.5;
   const arcs = [
@@ -763,7 +760,7 @@ function drawButton(x, y, w, h, text, color1, color2) {
 }
 
 // ============================================================
-//        Start Page — underwater green design
+//        Start Page
 // ============================================================
 function drawStartPage() {
   drawWater();
@@ -771,7 +768,7 @@ function drawStartPage() {
   drawLakebed();
 
   const bob = Math.sin(Date.now()/600) * 5;
-  frog.x = W/2; frog.y = 300 + bob;
+  frog.x = W/2; frog.y = H*0.5 + bob;
   drawFrog();
 
   const t = Math.min(1, (Date.now() - pageStartTime) / 400);
@@ -804,10 +801,10 @@ function drawStartPage() {
   ];
   for (const h of hints) {
     ctx.font = '26px sans-serif';
-    ctx.fillText(h.icon, h.x, 415);
+    ctx.fillText(h.icon, h.x, H - 185);
     ctx.font = 'bold 11px sans-serif';
     ctx.fillStyle = 'rgba(30,80,55,.7)';
-    ctx.fillText(h.label, h.x, 436);
+    ctx.fillText(h.label, h.x, H - 164);
   }
   ctx.restore();
 
@@ -815,18 +812,18 @@ function drawStartPage() {
     ctx.fillStyle = 'rgba(184,134,11,.9)';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(`Best · Level ${bestStage}`, W/2, 470);
+    ctx.fillText(`Best · Level ${bestStage}`, W/2, H - 130);
   }
 
   const pulse = 1 + Math.sin(Date.now()/400)*0.02;
   ctx.save();
-  ctx.translate(W/2, 525);
+  ctx.translate(W/2, H - 75);
   ctx.scale(pulse, pulse);
   drawButton(-100, -27, 200, 54, 'START', '#43c268', '#2e8b57');
   ctx.restore();
 }
 
-// ---------- HUD (screen space) ----------
+// ---------- HUD ----------
 function drawHUD() {
   ctx.fillStyle = '#f0a24a';
   ctx.font = 'bold 18px sans-serif';
